@@ -87,14 +87,15 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg)
     odom_pub.publish(laserOdometry);
 }
 
-//receive all point cloud
+// 当接收到点云数据时，将数据放入点云表面点缓冲区
 void pointCloudSurfCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
 {
     mutex_lock.lock();
     pointCloudSurfBuf.push(msg);
     mutex_lock.unlock();
 }
-//receive all point cloud
+
+// 当接收到点云数据时，将数据放入点云边缘点缓冲区
 void pointCloudEdgeCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
 {
     mutex_lock.lock();
@@ -102,7 +103,7 @@ void pointCloudEdgeCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
     mutex_lock.unlock();
 }
 
-//receive all point cloud
+// 当接收到环路信息时，将信息放入环路信息缓冲区
 void loopClosureCallback(const iscloam::LoopInfoConstPtr &msg)
 {
     mutex_lock.lock();
@@ -110,16 +111,19 @@ void loopClosureCallback(const iscloam::LoopInfoConstPtr &msg)
     mutex_lock.unlock();
 }
 
+// 全局优化处理函数
 void global_optimization(){
     while(1){
+        // 检查是否有足够的数据可以进行全局优化
         if(!loopInfoBuf.empty()&& !pointCloudSurfBuf.empty() && !pointCloudEdgeBuf.empty() && !odometryBuf.empty()){
 
             mutex_lock.lock();
-
+            // 获取时间戳以检查数据是否对齐
             double time1 =  loopInfoBuf.front()->header.stamp.toSec();
             double time2 =  odometryBuf.front()->header.stamp.toSec();
             double time3 =  pointCloudEdgeBuf.front()->header.stamp.toSec();
             double time4 =  pointCloudSurfBuf.front()->header.stamp.toSec();
+            // 检查时间戳是否对齐，如果不对齐则丢弃数据并打印警告信息
             if(!loopInfoBuf.empty() && (time1<time2-0.5*scan_period || time1<time3-0.5*scan_period || time1<time4-0.5*scan_period)){
                 ROS_WARN("time stamp unaligned error and loopInfoBuf discarded, pls check your data --> isc optimization"); 
                 loopInfoBuf.pop();

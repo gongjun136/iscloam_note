@@ -8,7 +8,466 @@ ISCOptimizationClass::ISCOptimizationClass()
 {
     
 }
+// #include "include/STDesc.h"
+#include <nav_msgs/Odometry.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/common/transforms.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <glog/logging.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+#include "include/ScanContext/scanContext.h"
+#include <pcl/point_types.h>
+#include <pcl/filters/uniform_sampling.h>
 
+/**
+ * @brief 从pose_file中解析时间戳和位姿信息
+ *
+ * @param pose_file 文本文件，数据顺序：时间戳、平移xyz、四元数wxyz
+ * @param poses_vec
+ * @param times_vec
+ */
+void load_pose_with_time(
+    const std::string &pose_file,
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> &poses_vec,
+    std::vector<double> &times_vec)
+{
+    // 1.清空时间戳容器、位姿容器
+    times_vec.clear();
+    poses_vec.clear();
+
+    // 2.将pose_file所有时间戳给时间戳容器，所有位姿给位姿容器
+    std::ifstream fin(pose_file);
+
+    if (!fin.is_open())
+    {
+        LOG(WARNING) << "Error: Unable to open the file " << pose_file;
+
+        return;
+    }
+    std::string line; // 用于存储每一行内容
+    Eigen::Matrix<double, 1, 7> temp_matrix;
+    while (getline(fin, line))
+    {
+        std::istringstream sin(line);
+        std::vector<std::string> Waypoints;
+        std::string info;
+        int number = 0;
+        while (getline(sin, info, ' '))
+        {
+            if (number == 0)
+            {
+                double time;
+                std::stringstream data;
+                data << info;
+                data >> time;
+                times_vec.push_back(time);
+                number++;
+            }
+            else
+            {
+                double p;
+                std::stringstream data;
+                data << info;
+                data >> p;
+                temp_matrix[number - 1] = p;
+                if (number == 7)
+                {
+                    Eigen::Vector3d translation(temp_matrix[0], temp_matrix[1],
+                                                temp_matrix[2]);
+                    Eigen::Quaterniond q(temp_matrix[6], temp_matrix[3], temp_matrix[4],
+                                         temp_matrix[5]);
+                    std::pair<Eigen::Vector3d, Eigen::Matrix3d> single_pose;
+                    single_pose.first = translation;
+                    single_pose.second = q.toRotationMatrix();
+                    poses_vec.push_back(single_pose);
+                }
+                number++;
+            }
+        }
+    }
+}
+// Read KITTI data
+/**
+ * @brief 读取KITTI的bin数据集
+ *
+ * @param lidar_data_path
+ * @return std::vector<float>
+ */
+std::vector<float> read_lidar_data(const std::string lidar_data_path)
+{
+    std::ifstream lidar_data_file;
+    lidar_data_file.open(lidar_data_path,
+                         std::ifstream::in | std::ifstream::binary); // 二进制模式打开文件
+    // 文件不存在，返回空数组
+    if (!lidar_data_file)
+    {
+        std::cout << "Read End..." << std::endl;
+        std::vector<float> nan_data;
+        return nan_data;
+        // exit(-1);
+    }
+    // 定位到文件末尾获取数据的元素数量
+    lidar_data_file.seekg(0, std::ios::end);
+    const size_t num_elements = lidar_data_file.tellg() / sizeof(float);
+    lidar_data_file.seekg(0, std::ios::beg);
+
+    // 从文件中读取LiDAR数据到缓存区
+    std::vector<float> lidar_data_buffer(num_elements);
+    lidar_data_file.read(reinterpret_cast<char *>(&lidar_data_buffer[0]),
+                         num_elements * sizeof(float));
+    return lidar_data_buffer;
+}
+
+void read_parameters(ros::NodeHandle &nh, ConfigSetting &config_setting)
+{
+
+    // pre-preocess
+    nh.param<double>("ds_size", config_setting.ds_size_, 0.5);
+    nh.param<int>("maximum_corner_num", config_setting.maximum_corner_num_, 100);
+
+    // key points
+    nh.param<double>("plane_merge_normal_thre",
+                     config_setting.plane_merge_normal_thre_, 0.1);
+    nh.param<double>("plane_detection_thre", config_setting.plane_detection_thre_,
+                     0.01);
+    nh.param<double>("voxel_size", config_setting.voxel_size_, 2.0);
+    nh.param<int>("voxel_init_num", config_setting.voxel_init_num_, 10);
+    nh.param<double>("proj_image_resolution",
+                     config_setting.proj_image_resolution_, 0.5);
+    nh.param<double>("proj_dis_min", config_setting.proj_dis_min_, 0);
+    nh.param<double>("proj_dis_max", config_setting.proj_dis_max_, 2);
+    nh.param<double>("corner_thre", config_setting.corner_thre_, 10);
+
+    // std descriptor
+    nh.param<int>("descriptor_near_num", config_setting.descriptor_near_num_, 10);
+    nh.param<double>("descriptor_min_len", config_setting.descriptor_min_len_, 2);
+    nh.param<double>("descriptor_max_len", config_setting.descriptor_max_len_,
+                     50);
+    nh.param<double>("non_max_suppression_radius",
+                     config_setting.non_max_suppression_radius_, 2.0);
+    nh.param<double>("std_side_resolution", config_setting.std_side_resolution_,
+                     0.2);
+
+    // candidate search
+    nh.param<int>("skip_near_num", config_setting.skip_near_num_, 50);
+    nh.param<int>("candidate_num", config_setting.candidate_num_, 50);
+    nh.param<int>("sub_frame_num", config_setting.sub_frame_num_, 10);
+    nh.param<double>("rough_dis_threshold", config_setting.rough_dis_threshold_,
+                     0.01);
+    nh.param<double>("vertex_diff_threshold",
+                     config_setting.vertex_diff_threshold_, 0.5);
+    nh.param<double>("icp_threshold", config_setting.icp_threshold_, 0.5);
+    nh.param<double>("normal_threshold", config_setting.normal_threshold_, 0.2);
+    nh.param<double>("dis_threshold", config_setting.dis_threshold_, 0.5);
+
+    nh.param<double>("SC_DIST_THRES", config_setting.SC_DIST_THRES, 0.4);
+
+    LOG(INFO) << "Sucessfully load parameters:";
+    LOG(INFO) << "----------------Main Parameters-------------------";
+    // LOG(INFO) << "downsample size:" << config_setting.ds_size_;
+    // LOG(INFO) << "maximum_corner_num:" << config_setting.maximum_corner_num_;
+
+    // LOG(INFO) << "plane_detection_thre:" << config_setting.plane_detection_thre_;
+    // LOG(INFO) << "plane_merge_normal_thre:" << config_setting.plane_merge_normal_thre_;
+    // LOG(INFO) << "voxel size:" << config_setting.voxel_size_;
+    // LOG(INFO) << "voxel_init_num:" << config_setting.voxel_init_num_;
+    // LOG(INFO) << "proj_image_resolution:" << config_setting.proj_image_resolution_;
+    // LOG(INFO) << "proj_dis_min:" << config_setting.proj_dis_min_;
+    // LOG(INFO) << "proj_dis_max:" << config_setting.proj_dis_max_;
+    // LOG(INFO) << "corner_thre:" << config_setting.corner_thre_;
+
+    // LOG(INFO) << "descriptor_near_num:" << config_setting.descriptor_near_num_;
+    // LOG(INFO) << "descriptor_min_len:" << config_setting.descriptor_min_len_;
+    // LOG(INFO) << "descriptor_max_len:" << config_setting.descriptor_max_len_;
+    // LOG(INFO) << "non_max_suppression_radius:" << config_setting.non_max_suppression_radius_;
+    // LOG(INFO) << "std_side_resolution:" << config_setting.std_side_resolution_;
+
+    // LOG(INFO) << "skip_near_num:" << config_setting.skip_near_num_;
+    // LOG(INFO) << "candidate_num:" << config_setting.candidate_num_;
+    LOG(INFO) << "sub_frame_num:" << config_setting.sub_frame_num_;
+    // LOG(INFO) << "vertex_diff_threshold:" << config_setting.vertex_diff_threshold_;
+    // LOG(INFO) << "rough_dis_threshold:" << config_setting.rough_dis_threshold_;
+    // LOG(INFO) << "normal_threshold:" << config_setting.normal_threshold_;
+    // LOG(INFO) << "dis_threshold:" << config_setting.dis_threshold_;
+    // LOG(INFO) << "loop detection threshold: " << config_setting.icp_threshold_;
+    LOG(INFO)<<"SC_DIST_THRES: "<<config_setting.SC_DIST_THRES;
+    LOG(INFO) << "----------------Main Parameters-------------------";
+    // LOG(INFO) << "voxel size:" << config_setting.voxel_size_;
+    // LOG(INFO) << "loop detection threshold: " << config_setting.icp_threshold_;
+    // LOG(INFO) << "sub-frame number: " << config_setting.sub_frame_num_;
+    // LOG(INFO) << "candidate number: " << config_setting.candidate_num_;
+    // LOG(INFO) << "maximum corners size: " << config_setting.maximum_corner_num_;
+}
+
+/**
+ * 计算两个时间点之间的差异，并返回该差异的毫秒值。
+ *
+ * @param t_end 结束的时间点。
+ * @param t_begin 开始的时间点。
+ * @return 两个时间点之间的差异，以毫秒为单位。
+ */
+double time_inc(std::chrono::_V2::system_clock::time_point &t_end,
+                std::chrono::_V2::system_clock::time_point &t_begin)
+{
+    // 计算 t_end 和 t_begin 之间的差异，并将其转换为 double 类型的秒数。
+    // 然后将秒数乘以 1000，以获取毫秒值。
+    return std::chrono::duration_cast<std::chrono::duration<double>>(t_end -
+                                                                     t_begin)
+               .count() *
+           1000;
+}
+
+inline pcl::PointCloud<pcl::PointXYZI>::Ptr translatePointCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloudIn, const Eigen::Vector3f &t)
+{
+    int cloudSize = cloudIn->size();
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloudOut(new pcl::PointCloud<pcl::PointXYZI>());
+    cloudOut->resize(cloudSize);
+
+    auto trans = t;
+
+    // #pragma omp parallel for num_threads(8)
+    for (int i = 0; i < cloudSize; ++i)
+    {
+        const auto &pointFrom = cloudIn->points[i];
+        cloudOut->points[i].x = pointFrom.x + trans[0];
+        cloudOut->points[i].y = pointFrom.y + trans[1];
+        cloudOut->points[i].z = pointFrom.z + trans[2];
+    }
+    return cloudOut;
+}
+
+int main(int argc, char **argv)
+{
+    ros::init(argc, argv, "demo_lixel");
+    ros::NodeHandle nh;
+    google::InitGoogleLogging(argv[0]);
+    FLAGS_log_dir = "/home/gj/catkin_ws_STD/src/STD/logs/";
+    FLAGS_alsologtostderr = 1;
+
+    // 从ROS参数服务器获取数据集路径和配置文件路径
+    std::string lidar_path = "";
+    std::string pose_path = "";
+    std::string config_path = "";
+    nh.param<std::string>("lidar_path", lidar_path, ""); // LiDAR数据集
+    nh.param<std::string>("pose_path", pose_path, "");   // 位姿文件
+
+    ConfigSetting config_setting;
+    read_parameters(nh, config_setting);
+    // 初始化ROS发布器，用于发布点云、位姿和其他可视化信息
+    ros::Publisher pubOdomAftMapped =
+        nh.advertise<nav_msgs::Odometry>("/aft_mapped_to_init", 10);
+    // ros::Publisher pubRegisterCloud =
+    //     nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100);
+    ros::Publisher pubCureentCloud =
+        nh.advertise<sensor_msgs::PointCloud2>("/cloud_current", 100);
+    ros::Publisher pubCurrentCorner =
+        nh.advertise<sensor_msgs::PointCloud2>("/cloud_key_points", 100);
+    ros::Publisher pubMatchedCloud =
+        nh.advertise<sensor_msgs::PointCloud2>("/cloud_matched", 100);
+    ros::Publisher pubMatchedCorner =
+        nh.advertise<sensor_msgs::PointCloud2>("/cloud_matched_key_points", 100);
+    ros::Publisher pubSTD =
+        nh.advertise<visualization_msgs::MarkerArray>("descriptor_line", 10);
+    tf2_ros::TransformBroadcaster br;
+
+    ros::Rate loop(500);
+    ros::Rate slow_loop(10);
+
+    // 加载位姿和时间戳
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> poses_vec; // 位姿容器
+    std::vector<double> times_vec;                                      // 时间戳容器
+    load_pose_with_time(pose_path, poses_vec, times_vec);
+    LOG(INFO) << "Sucessfully load pose with number: " << poses_vec.size();
+    // 构造一个描述符管理器用于SLAM的回环检测
+    // 闭环检测
+    SCManager scManager(config_setting);
+
+    size_t cloudInd = 0;
+    size_t keyCloudInd = 0;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr temp_cloud(
+        new pcl::PointCloud<pcl::PointXYZI>());
+
+    std::vector<double> descriptor_time;
+    std::vector<double> querying_time;
+    std::vector<double> update_time;
+    int triggle_loop_num = 0;
+    while (ros::ok())
+    {
+        // 1.读取雷达数据到lidar_data
+
+        // 使用给定的格式将lidar_path和cloudInd组合到一起
+        // std::setfill('0') 和 std::setw(10) 确保cloudInd是一个前导零的、宽度为10的数字
+        // 例如, 如果cloudInd是123, 它会被格式化为0000000123
+        std::stringstream lidar_data_path;
+        pcl::PointCloud<pcl::PointXYZI>::Ptr current_cloud(
+            new pcl::PointCloud<pcl::PointXYZI>());
+        lidar_data_path << lidar_path << std::setfill('0') << std::setw(8)
+                        << cloudInd << ".pcd";
+        pcl::io::loadPCDFile(lidar_data_path.str(), *current_cloud);
+        // std::vector<float> lidar_data = read_lidar_data(lidar_data_path.str());
+
+        // 空点云就退出循环
+        if (current_cloud->size() == 0)
+        {
+            LOG(INFO) << "pcd data " << cloudInd << " is empty";
+            break;
+        }
+        // // 2.将点云转到世界系，存放到PCL点云current_cloud
+        Eigen::Vector3d translation = poses_vec[cloudInd].first;
+        Eigen::Matrix3d rotation = poses_vec[cloudInd].second;
+
+        // Convert to float for PCL compatibility
+        Eigen::Vector3f translation_f = translation.cast<float>();
+        Eigen::Matrix3f rotation_f = rotation.cast<float>();
+
+        // Create a 4x4 transformation matrix
+        Eigen::Affine3f transform = Eigen::Affine3f::Identity();
+
+        // Set rotation and translation components
+        transform.linear() = rotation_f;
+        transform.translation() = translation_f;
+
+        // Perform the point cloud transformation in-place
+        pcl::transformPointCloud(*current_cloud, *current_cloud, transform);
+
+        // 下采样
+        // 创建均匀采样对象，并设置输入点云
+        pcl::UniformSampling<pcl::PointXYZI> uniform_sampling;
+        uniform_sampling.setInputCloud(current_cloud);
+        // 设置采样半径，即3D网格的大小
+        uniform_sampling.setRadiusSearch(0.1f); // 例如，0.01米
+
+        // 进行均匀采样处理，并将结果存储在原始点云对象中
+        uniform_sampling.filter(*current_cloud);
+
+        for (auto pv : current_cloud->points)
+        {
+            temp_cloud->points.push_back(pv);
+        }
+
+        // check if keyframe
+        if (cloudInd % config_setting.sub_frame_num_ == 0 && cloudInd != 0)
+        {
+            LOG(INFO) << "--------------";
+            LOG(INFO) << lidar_data_path.str();
+            Eigen::Quaterniond qua(rotation);
+            LOG(INFO) << "key frame pos: " << translation[0] << " " << translation[1] << " " << translation[2]
+                      << " att: " << qua.x() << " " << qua.y() << " " << qua.z() << " " << qua.w();
+            // LOG(INFO) << "Key Frame id:" << keyCloudInd
+            //           << ", cloud size: " << temp_cloud->size() ;
+            // step1. 描述符提取
+            auto t_descriptor_begin = std::chrono::high_resolution_clock::now();
+            Eigen::Vector3f inverseTranslation = -1 * translation_f;
+            pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_input(new pcl::PointCloud<pcl::PointXYZI>());
+            cloud_input = translatePointCloud(temp_cloud, inverseTranslation);
+            // 创建并保存Scan Context及其关键表示
+            scManager.makeAndSaveScancontextAndKeys(*cloud_input);
+            auto t_descriptor_end = std::chrono::high_resolution_clock::now();
+            descriptor_time.push_back(time_inc(t_descriptor_end, t_descriptor_begin));
+
+            // step2. 使用描述符搜索回环
+            auto t_query_begin = std::chrono::high_resolution_clock::now();
+            // 使用扫描上下文检测潜在的闭环
+            auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff
+            if (detectResult.first != -1)
+            {
+                LOG(INFO) << "Loop found! between: " << keyCloudInd << "--"
+                          << detectResult.first << ", score:" << detectResult.second;
+            }
+            auto t_query_end = std::chrono::high_resolution_clock::now();
+            querying_time.push_back(time_inc(t_query_end, t_query_begin));
+
+            LOG(INFO) << "[Time] descriptor extraction: "
+                      << time_inc(t_descriptor_end, t_descriptor_begin) << "ms, "
+                      << "query: " << time_inc(t_query_end, t_query_begin) << "ms, ";
+
+            // publish
+            // 创建一个用于发布的点云消息
+            sensor_msgs::PointCloud2 pub_cloud;
+            // 发布temp_cloud
+            pcl::toROSMsg(*temp_cloud, pub_cloud);
+            pub_cloud.header.frame_id = "camera_init";
+            pubCureentCloud.publish(pub_cloud);
+
+            // // 如果搜索结果的第一个元素大于0，表示找到了一个可能的回环
+            // if (search_result.first > 0)
+            // {
+            //     // 增加检测到的回环数量
+            //     triggle_loop_num++;
+            //     // 将检测到的回环的关键帧转换为ROS消息格式
+            //     pcl::toROSMsg(*std_manager->key_cloud_vec_[search_result.first],
+            //                   pub_cloud);
+            //     // 设置消息的坐标系,发布点云
+            //     pub_cloud.header.frame_id = "camera_init";
+            //     pubMatchedCloud.publish(pub_cloud);
+
+            //     // 短暂休眠，确保数据发布成功
+            //     slow_loop.sleep();
+
+            //     // 转换和发布检测到的回环的关键点的点云
+            //     pcl::toROSMsg(*std_manager->corner_cloud_vec_[search_result.first],
+            //                   pub_cloud);
+            //     pub_cloud.header.frame_id = "camera_init";
+            //     pubMatchedCorner.publish(pub_cloud);
+            //     // 发布与回环匹配的描述符对
+            //     publish_std_pairs(loop_std_pair, pubSTD);
+            //     // 再次短暂休眠
+            //     slow_loop.sleep();
+            //     // getchar();
+            // }
+            temp_cloud->clear();
+            keyCloudInd++;
+            loop.sleep();
+        }
+        // 发布当前帧的位姿
+        nav_msgs::Odometry odom;
+        odom.header.frame_id = "camera_init";
+        odom.pose.pose.position.x = translation[0];
+        odom.pose.pose.position.y = translation[1];
+        odom.pose.pose.position.z = translation[2];
+        Eigen::Quaterniond q(rotation);
+        odom.pose.pose.orientation.w = q.w();
+        odom.pose.pose.orientation.x = q.x();
+        odom.pose.pose.orientation.y = q.y();
+        odom.pose.pose.orientation.z = q.z();
+        pubOdomAftMapped.publish(odom);
+
+        geometry_msgs::TransformStamped transformStamped;
+        transformStamped.header.stamp = ros::Time::now();
+        transformStamped.header.frame_id = "camera_init";
+        transformStamped.child_frame_id = "odom";
+        transformStamped.transform.translation.x = odom.pose.pose.position.x;
+        transformStamped.transform.translation.y = odom.pose.pose.position.y;
+        transformStamped.transform.translation.z = odom.pose.pose.position.z;
+        transformStamped.transform.rotation.x = odom.pose.pose.orientation.x;
+        transformStamped.transform.rotation.y = odom.pose.pose.orientation.y;
+        transformStamped.transform.rotation.z = odom.pose.pose.orientation.z;
+        transformStamped.transform.rotation.w = odom.pose.pose.orientation.w;
+
+        br.sendTransform(transformStamped);
+
+        loop.sleep();
+        cloudInd++;
+    }
+    double mean_descriptor_time =
+        std::accumulate(descriptor_time.begin(), descriptor_time.end(), 0) * 1.0 /
+        descriptor_time.size();
+    double mean_query_time =
+        std::accumulate(querying_time.begin(), querying_time.end(), 0) * 1.0 /
+        querying_time.size();
+    // double mean_update_time =
+    //     std::accumulate(update_time.begin(), update_time.end(), 0) * 1.0 /
+    //     update_time.size();
+    LOG(INFO) << "Total key frame number:" << keyCloudInd
+              << ", loop number:" << triggle_loop_num;
+    LOG(INFO) << "Mean time for descriptor extraction: " << mean_descriptor_time
+              << "ms, query: " << mean_query_time << "ms, total: "
+              << mean_descriptor_time + mean_query_time << "ms";
+    google::ShutdownGoogleLogging();
+    return 0;
+}
 void ISCOptimizationClass::init(void){
 
     pointcloud_arr.clear();

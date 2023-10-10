@@ -53,6 +53,7 @@ void velodyneHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     mutex_lock.unlock();
 }
 
+// 计算雷达里程计
 bool is_odom_inited = false;
 double total_time =0;
 int total_frame=0;
@@ -125,7 +126,7 @@ void odom_estimation(){
             transform.setRotation(q);
             br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "map", "aft_mapped"));
 
-            // publish odometry
+            // 发布里程计
             nav_msgs::Odometry laserOdometry;
             laserOdometry.header.frame_id = "world"; 
             laserOdometry.child_frame_id = "aft_mapped"; 

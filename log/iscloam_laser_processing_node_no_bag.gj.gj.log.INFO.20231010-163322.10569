@@ -1,0 +1,4 @@
+Log file created at: 2023/10/10 16:33:22
+Running on machine: gj
+Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg
+I1010 16:33:22.452955 10569 laserProcessingNodeNoBag.cpp:187] 0000000000.bin

@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
 <launch>
 
-    <node pkg="rosbag" type="play" name="rosbag_play" args="--clock $(env HOME)/Downloads/2011_09_30_0018.bag"/> 
+
 
     <!--- Sim Time -->
-    <param name="/use_sim_time" value="true" />
+    <!-- <param name="/use_sim_time" value="true" /> -->
     <param name="scan_period" value="0.1" />
     <param name="scan_line" value="64" />
     <param name="ring_height" type="int" value="20" />
@@ -13,8 +13,10 @@
     <param name="max_dis" type="double" value="90.0" />
     <param name="min_dis" type="double" value="3.0" />
 
+    <param name="file_path" type="string" value="/mnt/e/dataset/Lixel-X1/data/2023-09-19-164552/log/pcd/"/>
+
     <node pkg="iscloam" type="iscloam_odom_estimation_node" name="iscloam_odom_estimation_node" output="screen"/>
-    <node pkg="iscloam" type="iscloam_laser_processing_node" name="iscloam_laser_processing_node" output="screen"/>
+    <node pkg="iscloam" type="iscloam_laser_processing_node_no_bag" name="iscloam_laser_processing_node_no_bag" output="screen"/>
     <node pkg="iscloam" type="iscloam_isc_generation_node" name="iscloam_isc_generation_node" output="screen"/>
     <node pkg="iscloam" type="iscloam_isc_optimization_node" name="iscloam_isc_optimization_node" output="screen"/>
 
@@ -26,12 +28,12 @@
     </group>
 
     
-    <node pkg="hector_trajectory_server" type="hector_trajectory_server" name="trajectory_server_loam" ns="gt" >
+    <!-- <node pkg="hector_trajectory_server" type="hector_trajectory_server" name="trajectory_server_loam" ns="gt" >
         <param name="/target_frame_name" value="world" />
         <param name="/source_frame_name" value="velodyne" />
         <param name="/trajectory_update_rate" value="10.0" />
         <param name="/trajectory_publish_rate" value="10.0" />
-    </node>
+    </node> -->
     <node pkg="hector_trajectory_server" type="hector_trajectory_server" name="trajectory_server_loam" ns="odom_final" >
         <param name="/target_frame_name" value="world" />
         <param name="/source_frame_name" value="odom_final" />

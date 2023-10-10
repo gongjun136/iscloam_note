@@ -1,0 +1,4 @@
+Log file created at: 2023/10/10 16:36:46
+Running on machine: gj
+Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg
+I1010 16:36:46.196784 14473 laserProcessingNodeNoBag.cpp:189] /mnt/f/datasets/KITTI raw data/training/05/2011_09_30_drive_0018_sync/2011_09_30/2011_09_30_drive_0018_sync/velodyne_points/data/0000000000.bin
